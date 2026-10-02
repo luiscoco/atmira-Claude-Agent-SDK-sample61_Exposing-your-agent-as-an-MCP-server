@@ -44,9 +44,16 @@ try {
   await waitFor(`document.body.textContent.includes('no token → 401') && document.body.textContent.includes('forged Host → 403')`);
   await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Check stdio').click()`);
   await waitFor(`document.body.textContent.includes('stdio ✓') && document.body.textContent.includes('scripted verdict approve for O-205')`);
+  // F: Refresh fetches the log again and says so, even when nothing changed.
+  const updated = `document.body.textContent.match(/updated ([^.]+)\./)?.[1]`;
+  await waitFor(`${updated}`);
+  const before = await evaluate(updated);
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await evaluate(`Array.from(document.querySelectorAll('button')).find(b => b.textContent === 'Refresh').click()`);
+  await waitFor(`${updated} && ${updated} !== ${JSON.stringify(before)}`);
   const screenshot = await cdp("Page.captureScreenshot", { format: "png" });
   writeFileSync(path.join(output, "lesson61-desktop.png"), Buffer.from(screenshot.data, "base64"));
   await cdp("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   assert.ok(await evaluate(`document.documentElement.scrollWidth <= 390`), "No horizontal overflow on mobile");
-  console.log("Lesson 61 browser checks passed: navigation, tools/list, the contract table, the HTTP and stdio checks and mobile width. No model turns.");
+  console.log("Lesson 61 browser checks passed: navigation, tools/list, the contract table, the HTTP and stdio checks, Refresh of the server log and mobile width. No model turns.");
 } finally { socket?.close(); chrome?.kill(); await web.close(); api.close(); }

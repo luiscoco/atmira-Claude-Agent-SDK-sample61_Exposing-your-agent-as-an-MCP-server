@@ -13,6 +13,7 @@ type Usage = { costUsd: number; turns: number; durationMs: number };
 type CallLog = { at: number; transport: string; caller: string; orderId: string; outcome: string; isError: boolean; usage?: Usage; ms: number; progress: string[] };
 type Verdict = { orderId: string; decision: string; brokenRules: string[]; customerReply: string };
 
+const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
 const usd = (n: number) => `$${n.toFixed(4)}`;
 const getJson = async (url: string, init?: RequestInit) => {
   const response = await fetch(url, init);
@@ -45,12 +46,19 @@ export function Concept61AgentMcpServer() {
     const controller = new AbortController();
     Promise.all(["facts", "describe", "contract", "code", "log"].map((route) => getJson(`/api/c61/${route}`, { signal: controller.signal }))).then(([f, d, c, k, l]) => {
       if (controller.signal.aborted) return;
-      setFacts(f); setDesk(d); setContract(c); setCode(k); setServerLog(l); setMessage((m) => m || f.sampleMessages["O-206"]); setError("");
+      setFacts(f); setDesk(d); setContract(c); setCode(k); setServerLog(l); setLogAt(Date.now()); setMessage((m) => m || f.sampleMessages["O-206"]); setError("");
     }).catch((e) => { if (!controller.signal.aborted) setError(String(e)); });
     return () => { controller.abort(); abortRef.current?.abort(); };
   }, [attempt]);
 
-  const refreshLog = async () => { try { setServerLog(await getJson("/api/c61/log")); } catch (e) { setError(String(e)); } };
+  const [refreshing, setRefreshing] = useState(false);
+  const [logAt, setLogAt] = useState(0);
+  /** no-store: always ask the server, never a cached 304. logAt shows that a click did something even when nothing changed. */
+  const refreshLog = async () => {
+    setRefreshing(true);
+    try { setServerLog(await getJson("/api/c61/log", { cache: "no-store" })); setLogAt(Date.now()); } catch (e) { setError(String(e)); }
+    finally { setRefreshing(false); }
+  };
   async function check(kind: "stdio" | "http") {
     setChecking(kind); setError("");
     try { const data = await getJson(`/api/c61/${kind}-check`); setChecks((all) => ({ ...all, [kind]: data })); } catch (e) { setError(String(e)); }
@@ -85,7 +93,11 @@ export function Concept61AgentMcpServer() {
       if (event === "tool") add(`outer → ${data.name}(${data.input.orderId})`);
       if (event === "inner") add(`    desk [${data.orderId}] ${data.outcome}${data.usage ? ` · inner agent ${data.usage.turns} turns, ${usd(data.usage.costUsd)}, ${data.ms} ms` : ""}`);
       if (event === "tool_result") add(`outer ← ${data.isError ? "isError: " : ""}${typeof data.content === "string" ? data.content : JSON.stringify(data.content)}`.slice(0, 260));
-      if (event === "result") setDelegateResult(data);
+      if (event === "result") {
+        // The lead's last text block IS its final answer: drop it from the log, the result card below shows it once.
+        setDelegateLog((all) => all.length && all[all.length - 1] === `outer: ${data.text}` ? all.slice(0, -1) : all);
+        setDelegateResult(data);
+      }
       if (event === "error") add(`error: ${data.message}`);
     });
   };
@@ -107,6 +119,7 @@ export function Concept61AgentMcpServer() {
     {desk && <>
       <p className="hint">Server <code>{desk.server.name} {desk.server.version}</code> · instructions: “{desk.instructions}” · resources: {desk.resources.map((r) => <code key={r.uri}>{r.uri}</code>)}</p>
       <details className="card" open><summary>tools/list → review_refund</summary><pre className="wrap" style={{ maxHeight: 360, overflow: "auto" }}>{JSON.stringify(desk.tools[0], null, 2)}</pre></details>
+      <p className="hint">The <code>$schema</code> keys come from the MCP SDK and are harmless in <code>tools/list</code> (the support lead in section E connects fine). Only the agent's <code>outputFormat</code> must not have one: Claude Code rejects it there (see the readme).</p>
     </>}
     <details className="card"><summary>Behind the tool: the orders and the inner system prompt (never sent to the caller)</summary>
       <div className="scroll-x"><table className="tools"><thead><tr><th>Order</th><th>Customer</th><th>Item</th><th>Amount</th><th>Days</th><th>Condition</th><th>Policy says</th></tr></thead><tbody>
@@ -119,7 +132,7 @@ export function Concept61AgentMcpServer() {
     <p>A real MCP client calls the real server. A scripted runner stands in for the agent, so no model runs. Every row is what a caller really receives.</p>
     <div className="scroll-x"><table className="tools compare"><thead><tr><th>Scenario</th><th>Caller gets</th><th>Progress</th><th>Server log</th><th>Agent ran</th></tr></thead><tbody>
       {contract.map((row) => <tr key={row.scenario}><td>{row.scenario}<br /><span className="hint"><code>{row.call.slice(0, 90)}</code></span></td>
-        <td>{row.thrown ? <><b>throws</b> <span className="hint">{row.thrown.slice(0, 120)}</span></> : <><b>{row.isError ? "isError" : "ok"}</b> <span className="hint">{row.text.slice(0, 140)}</span></>}</td>
+        <td>{row.thrown ? <><b>throws</b> <span className="hint">{clip(row.thrown, 200)}</span></> : <><b>{row.isError ? "isError" : "ok"}</b> <span className="hint">{clip(row.text, 200)}</span></>}</td>
         <td className="hint">{row.progress.join(" → ") || "–"}</td><td className="hint">{row.serverLog}</td><td>{row.agentRan ? "yes" : <b>no</b>}</td></tr>)}
     </tbody></table></div>
     <p className="hint">Unknown orders, the concurrency cap ({facts?.limits.maxConcurrent}) and the budget (${facts?.limits.serverBudgetUsd.toFixed(2)} per process) are checked before the agent starts, so a refusal costs nothing. Schema failures come back as <code>isError</code> results too (the MCP SDK converts them), so the caller's model can read the message and fix its call. A cancel from the caller fires the agent's <code>AbortController</code>: the server log says “cancelled”, and no agent keeps running unseen.</p>
@@ -182,9 +195,9 @@ export function Concept61AgentMcpServer() {
     </div>}
 
     <h3>F · The server's view</h3>
-    <div className="row"><button disabled={!!busy} onClick={refreshLog}>Refresh</button>{serverLog && <span className="hint">Spent by this process: {usd(serverLog.spentUsd)} of ${facts?.limits.serverBudgetUsd.toFixed(2)}.</span>}</div>
+    <div className="row"><button disabled={!!busy || refreshing} onClick={refreshLog}>{refreshing ? "Refreshing…" : "Refresh"}</button>{serverLog && <span className="hint">Spent by this process: {usd(serverLog.spentUsd)} of ${facts?.limits.serverBudgetUsd.toFixed(2)} · {serverLog.calls.length} calls · updated {new Date(logAt).toLocaleTimeString()}. Calls from outside clients (Claude Code over HTTP) show up here too.</span>}</div>
     {serverLog && serverLog.calls.length > 0 && <div className="scroll-x"><table className="tools"><thead><tr><th>When</th><th>Transport</th><th>Caller</th><th>Order</th><th>Outcome</th><th>Inner agent</th><th>ms</th></tr></thead><tbody>
-      {serverLog.calls.map((c, i) => <tr key={i}><td>{new Date(c.at).toLocaleTimeString()}</td><td>{c.transport}</td><td>{c.caller}</td><td><code>{c.orderId}</code></td><td>{c.isError ? <b>{c.outcome}</b> : c.outcome}</td><td className="hint">{c.usage ? `${c.usage.turns} turns · ${usd(c.usage.costUsd)}` : "–"}</td><td>{c.ms}</td></tr>)}
+      {[...serverLog.calls].sort((a, b) => b.at - a.at).map((c, i) => <tr key={i}><td>{new Date(c.at).toLocaleTimeString()}</td><td>{c.transport}</td><td>{c.caller}</td><td><code>{c.orderId}</code></td><td>{c.isError ? <b>{c.outcome}</b> : c.outcome}</td><td className="hint">{c.usage ? `${c.usage.turns} turns · ${usd(c.usage.costUsd)}` : "–"}</td><td>{c.ms}</td></tr>)}
     </tbody></table></div>}
 
     <h3>G · Apply it to your agent</h3>
